@@ -10,7 +10,7 @@ from opensearchpy import OpenSearch, helpers
 
 app = Chalice(app_name='job')
 app.debug = True
-openai_client = None
+openai_client = os.environ['OPENAI_KEY']
 
 def extractJobDate(data):
     return data.get('postedAt')
