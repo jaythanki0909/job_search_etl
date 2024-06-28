@@ -7,8 +7,11 @@ import datetime
 import os
 from openai import OpenAI
 from opensearchpy import OpenSearch, helpers
+import boto3
+import json
 
 app = Chalice(app_name='job')
+client = boto3.client('lambda')
 app.debug = True
 openai_client = OpenAI(api_key=os.environ['OPENAI_KEY'])
 
@@ -58,11 +61,10 @@ def opneAiSummary(data):
     summary = response.choices[0].message.content.strip()
     return summary  
 
-@app.schedule('cron(0/30 * * * ? *)')
-# @app.route('/')
-def job_ETL(event):
-    
-    client = ApifyClient(os.environ['APIFY_KEY'])
+# @app.schedule('cron(0/30 * * * ? *)')
+@app.route('/')
+def job_extractor(): 
+    apifyClient = ApifyClient(os.environ['APIFY_KEY'])
     job_titles = ["Data Analyst", "Data Engineer", "Data Scientist", "Software Developer", "Product Manager"]
     locations = {"w+CAIQICIHVG9yb250bw==": "Toronto", "w+CAIQICIJVmFuY291dmVy": "Vancourver"} 
     df = pd.DataFrame()
@@ -83,21 +85,56 @@ def job_ETL(event):
                 "customMapFunction": "(object) => { return {...object} }",
                 "proxy": { "useApifyProxy": True },
             }
-            run = client.actor("nopnOEWIYjLQfBqEO").call(run_input=run_input)   
-            data = client.dataset(run["defaultDatasetId"]).list_items().items
+            run = apifyClient.actor("nopnOEWIYjLQfBqEO").call(run_input=run_input)   
+            data = apifyClient.dataset(run["defaultDatasetId"]).list_items().items
             temp = pd.DataFrame(data)
             temp['location'] = locations[location]
             temp['title'] = job
             df = pd.concat([df,temp])
+    
+    df_json = df.to_json(orient='records')
+    payload = {
+        'data': df_json,
+    }
+    
+    response = client.invoke(
+        FunctionName='job-dev-data_transformer',
+        InvocationType='Event',  # Asynchronous invocation
+        Payload=json.dumps(payload)  # Convert dictionary to JSON string
+    )
+    print('Data Transformed and es_loader called')
+    return {'message': 'Data Transformed and es_loader called'}
+
+@app.lambda_function(name='data_transformer')
+def data_transformer(event, context):
+
+    df_json = event.get('data')
+    df = pd.read_json(df_json)
     df.drop(columns=['companyLogo','relatedLinks'], inplace=True)
     df['postedDate'] = df['metadata'].map(extractJobDate)
     df['postedDate'] = df.postedDate.map(dateFormat)
     df['aiSummary'] = df.apply(opneAiSummary,axis=1)
+    
+    payload = {
+        'data': df,
+    }
+    
+    response = client.invoke(
+        FunctionName='job-dev-es_loader',
+        InvocationType='Event',  # Asynchronous invocation
+        Payload=json.dumps(payload)  # Convert dictionary to JSON string
+    )
+    print('Data Transformed and es_loader called')
+    return {'message': 'Data Transformed and es_loader called'}
 
+
+@app.lambda_function(name='es_loader')
+def es_loader(event, context):
+    df = event.get('data')
     host = os.environ['ELASTIC_HOST']
     port = 443
     auth = (os.environ['ELASTIC_USERNAME'], os.environ['ELASTIC_PASSWORD'])
-    
+
     client = OpenSearch(
         hosts = [{'host': host, 'port': port}],
         http_compress = True, # enables gzip compression for request bodies
@@ -107,34 +144,11 @@ def job_ETL(event):
         ssl_show_warn = False,
     )
     index_name = "job_jay"
-
+    
     if not client.indices.exists(index_name):
         client.indices.create(index=index_name)
     helpers.bulk(client, doc_generator(index_name,df))
 
     print("Data Saved to ES")
-    
-
-    
     return {'message': 'Data Saved to ES'}
-
-
-# The view function above will return {"hello": "world"}
-# whenever you make an HTTP GET request to '/'.
-#
-# Here are a few more examples:
-#
-# @app.route('/hello/{name}')
-# def hello_name(name):
-#    # '/hello/james' -> {"hello": "james"}
-#    return {'hello': name}
-#
-# @app.route('/users', methods=['POST'])
-# def create_user():
-#     # This is the JSON body the user sent in their POST request.
-#     user_as_json = app.current_request.json_body
-#     # We'll echo the json body back to the user in a 'user' key.
-#     return {'user': user_as_json}
-#
-# See the README documentation for more examples.
-#
+    
