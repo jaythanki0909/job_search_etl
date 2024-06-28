@@ -1,0 +1,3 @@
+.chalice/
+config.json
+__pycache__

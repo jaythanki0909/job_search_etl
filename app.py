@@ -10,7 +10,7 @@ from opensearchpy import OpenSearch, helpers
 
 app = Chalice(app_name='job')
 app.debug = True
-openai_client = None
+openai_client = OpenAI(api_key=os.environ['OPENAI_KEY'])
 
 def extractJobDate(data):
     return data.get('postedAt')
@@ -62,7 +62,7 @@ def opneAiSummary(data):
 # @app.route('/')
 def job_ETL(event):
     
-    client = ApifyClient("")
+    client = ApifyClient(os.environ['APIFY_KEY'])
     job_titles = ["Data Analyst", "Data Engineer", "Data Scientist", "Software Developer", "Product Manager"]
     locations = {"w+CAIQICIHVG9yb250bw==": "Toronto", "w+CAIQICIJVmFuY291dmVy": "Vancourver"} 
     df = pd.DataFrame()
@@ -94,10 +94,10 @@ def job_ETL(event):
     df['postedDate'] = df.postedDate.map(dateFormat)
     df['aiSummary'] = df.apply(opneAiSummary,axis=1)
 
-    host = ''
+    host = os.environ['ELASTIC_HOST']
     port = 443
-    auth = ('', '') # For testing only. Don't store credentials in code.
-
+    auth = (os.environ['ELASTIC_USERNAME'], os.environ['ELASTIC_PASSWORD'])
+    
     client = OpenSearch(
         hosts = [{'host': host, 'port': port}],
         http_compress = True, # enables gzip compression for request bodies
