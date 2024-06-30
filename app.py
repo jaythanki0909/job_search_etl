@@ -12,8 +12,11 @@ import json
 
 app = Chalice(app_name='job')
 client = boto3.client('lambda')
+s3 = boto3.client('s3')
+
 app.debug = True
 openai_client = OpenAI(api_key=os.environ['OPENAI_KEY'])
+S3_BUCKET = 'jay-bucket-0909'
 
 def extractJobDate(data):
     return data.get('postedAt')
@@ -93,8 +96,11 @@ def job_extractor():
             df = pd.concat([df,temp])
     
     df_json = df.to_json(orient='records')
+    s3_key = 'job_data.json'
+    s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=df_json)
     payload = {
-        'data': df_json,
+        's3_bucket': S3_BUCKET,
+        's3_key': s3_key,
     }
     
     response = client.invoke(
@@ -102,35 +108,48 @@ def job_extractor():
         InvocationType='Event',  # Asynchronous invocation
         Payload=json.dumps(payload)  # Convert dictionary to JSON string
     )
-    print('Data Transformed and es_loader called')
-    return {'message': 'Data Transformed and es_loader called'}
+    print('Data Extracted and data transformer called')
+    return {'message': 'Data Extracted and data transformer called'}
 
 @app.lambda_function(name='data_transformer')
 def data_transformer(event, context):
 
-    df_json = event.get('data')
+    s3_bucket = event.get('s3_bucket')
+    s3_key = event.get('s3_key')
+    response = s3.get_object(Bucket=s3_bucket, Key=s3_key)
+    df_json = response['Body'].read().decode('utf-8')
     df = pd.read_json(df_json)
     df.drop(columns=['companyLogo','relatedLinks'], inplace=True)
     df['postedDate'] = df['metadata'].map(extractJobDate)
     df['postedDate'] = df.postedDate.map(dateFormat)
     df['aiSummary'] = df.apply(opneAiSummary,axis=1)
-    
+
+    df_json = df.to_json(orient='records')
+    s3_key = 'job_data.json'
+    s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=df_json)
     payload = {
-        'data': df,
+        's3_bucket': S3_BUCKET,
+        's3_key': s3_key,
     }
+    
     
     response = client.invoke(
         FunctionName='job-dev-es_loader',
         InvocationType='Event',  # Asynchronous invocation
         Payload=json.dumps(payload)  # Convert dictionary to JSON string
     )
+
     print('Data Transformed and es_loader called')
     return {'message': 'Data Transformed and es_loader called'}
 
 
 @app.lambda_function(name='es_loader')
 def es_loader(event, context):
-    df = event.get('data')
+    s3_bucket = event.get('s3_bucket')
+    s3_key = event.get('s3_key')
+    response = s3.get_object(Bucket=s3_bucket, Key=s3_key)
+    df_json = response['Body'].read().decode('utf-8')
+    df = pd.read_json(df_json)
     host = os.environ['ELASTIC_HOST']
     port = 443
     auth = (os.environ['ELASTIC_USERNAME'], os.environ['ELASTIC_PASSWORD'])
@@ -144,7 +163,7 @@ def es_loader(event, context):
         ssl_show_warn = False,
     )
     index_name = "job_jay"
-    
+
     if not client.indices.exists(index_name):
         client.indices.create(index=index_name)
     helpers.bulk(client, doc_generator(index_name,df))
