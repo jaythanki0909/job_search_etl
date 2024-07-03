@@ -9,6 +9,8 @@ from openai import OpenAI
 from opensearchpy import OpenSearch, helpers
 import boto3
 import json
+from PyPDF2 import PdfReader
+import io
 
 app = Chalice(app_name='job')
 client = boto3.client('lambda')
@@ -63,6 +65,22 @@ def opneAiSummary(data):
 
     summary = response.choices[0].message.content.strip()
     return summary  
+
+def opneAiOcr(text):
+    prompt = f"""
+Given the following OCR result from a resume, put it in a readable format.
+### OCR Result
+{text}
+"""
+    response = openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "user", "content": prompt}
+        ])
+
+    ocrResult = response.choices[0].message.content.strip()
+    return ocrResult  
+
 
 # @app.schedule('cron(0/30 * * * ? *)')
 @app.route('/')
@@ -171,3 +189,41 @@ def es_loader(event, context):
     print("Data Saved to ES")
     return {'message': 'Data Saved to ES'}
     
+@app.lambda_function(name='ocr_resume')
+def ocr_resume(event,context):
+    print("Received event:", event)
+    for record in event['Records']:
+        s3_bucket = record['s3']['bucket']['name']
+        s3_key = record['s3']['object']['key']
+
+        file = s3.get_object(Bucket=s3_bucket, Key=s3_key)
+        file_content = file['Body'].read()
+
+        pdf_file = io.BytesIO(file_content)
+        reader = PdfReader(pdf_file)  
+        # number_of_pages = len(reader.pages)  
+        page = reader.pages[0]  
+        text = page.extract_text()
+        ocrResult = opneAiOcr(text)
+        host = os.environ['ELASTIC_HOST']
+        port = 443
+        auth = (os.environ['ELASTIC_USERNAME'], os.environ['ELASTIC_PASSWORD'])
+
+        client = OpenSearch(
+            hosts = [{'host': host, 'port': port}],
+            http_compress = True, # enables gzip compression for request bodies
+            http_auth = auth,
+            use_ssl = True,
+            ssl_assert_hostname = False,
+            ssl_show_warn = False,
+        )
+        index_name = "job_ocr_results"
+        if not client.indices.exists(index_name):
+            client.indices.create(index=index_name)
+        helpers.bulk(client, [{
+                "_index": index_name,
+                "_source": {"resume":ocrResult},
+            }])
+        print("OCR result saved to ES")
+        
+    return {'message':'OCR here'}
